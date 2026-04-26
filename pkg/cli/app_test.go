@@ -1,11 +1,17 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"testing"
 
 	"github.com/mirkobrombin/go-cli-builder/v2/pkg/parser"
+)
+
+var (
+	errBeforeFailed = errors.New("before failed")
+	errAfterFailed  = errors.New("after failed")
 )
 
 type testRootCmd struct {
@@ -405,9 +411,198 @@ func TestInjectDependencies_NoBase(t *testing.T) {
 }
 
 func TestRunFunction(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
 	os.Args = []string{"app", "add", "testitem"}
 	err := Run(&testRootCmd{})
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
+	}
+}
+
+type lifecycleCmd struct {
+	Ran     bool
+	BeforeRan bool
+	AfterRan  bool
+
+	Sub lifecycleSubCmd `cmd:"" help:"sub"`
+}
+
+func (c *lifecycleCmd) Before() error {
+	c.BeforeRan = true
+	return nil
+}
+
+func (c *lifecycleCmd) Run() error {
+	c.Ran = true
+	return nil
+}
+
+func (c *lifecycleCmd) After() error {
+	c.AfterRan = true
+	return nil
+}
+
+type lifecycleSubCmd struct {
+	Ran     bool
+	BeforeRan bool
+	AfterRan  bool
+}
+
+func (c *lifecycleSubCmd) Before() error {
+	c.BeforeRan = true
+	return nil
+}
+
+func (c *lifecycleSubCmd) Run() error {
+	c.Ran = true
+	return nil
+}
+
+func (c *lifecycleSubCmd) After() error {
+	c.AfterRan = true
+	return nil
+}
+
+func TestRun_LifecycleOrder(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	cmd := &lifecycleCmd{}
+	os.Args = []string{"app", "sub"}
+	if err := Run(cmd); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if !cmd.BeforeRan {
+		t.Error("expected root Before to be called")
+	}
+	if !cmd.Sub.BeforeRan {
+		t.Error("expected sub Before to be called")
+	}
+	if !cmd.Sub.Ran {
+		t.Error("expected sub Run to be called")
+	}
+	if !cmd.Sub.AfterRan {
+		t.Error("expected sub After to be called")
+	}
+	if !cmd.AfterRan {
+		t.Error("expected root After to be called")
+	}
+}
+
+type beforeErrorCmd struct {
+	ShouldFail bool
+}
+
+func (c *beforeErrorCmd) Before() error {
+	if c.ShouldFail {
+		return errBeforeFailed
+	}
+	return nil
+}
+
+func (c *beforeErrorCmd) Run() error { return nil }
+
+type runWithHelpCmd struct {
+	Name string `cli:"name" help:"Your name"`
+}
+
+func (c *runWithHelpCmd) Run() error { return nil }
+
+func TestRun_HelpFlag(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{"app", "--help"}
+	if err := Run(&runWithHelpCmd{}); err != nil {
+		t.Fatalf("Run with --help failed: %v", err)
+	}
+}
+
+func TestRun_ShortHelp(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{"app", "-h"}
+	if err := Run(&runWithHelpCmd{}); err != nil {
+		t.Fatalf("Run with -h failed: %v", err)
+	}
+}
+
+func TestRun_BeforeError(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	cmd := &beforeErrorCmd{ShouldFail: true}
+	os.Args = []string{"app"}
+	if err := Run(cmd); err == nil {
+		t.Error("expected error from Before")
+	}
+}
+
+func TestRun_UnknownCommand(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{"app", "unknown"}
+	if err := Run(&testRootCmd{}); err != nil {
+		t.Errorf("Run with unknown command should print help, got error: %v", err)
+	}
+}
+
+type rootWithBeforeAndAfter struct {
+	BeforeCalled bool
+	AfterCalled  bool
+	RunCalled    bool
+}
+
+func (c *rootWithBeforeAndAfter) Before() error {
+	c.BeforeCalled = true
+	return nil
+}
+
+func (c *rootWithBeforeAndAfter) Run() error {
+	c.RunCalled = true
+	return nil
+}
+
+func (c *rootWithBeforeAndAfter) After() error {
+	c.AfterCalled = true
+	return nil
+}
+
+func TestRun_RootLifecycle(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	cmd := &rootWithBeforeAndAfter{}
+	os.Args = []string{"app"}
+	if err := Run(cmd); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if !cmd.BeforeCalled {
+		t.Error("expected Before to be called")
+	}
+	if !cmd.RunCalled {
+		t.Error("expected Run to be called")
+	}
+	if !cmd.AfterCalled {
+		t.Error("expected After to be called")
+	}
+}
+
+type afterErrorCmd struct{}
+
+func (c *afterErrorCmd) Before() error { return nil }
+func (c *afterErrorCmd) Run() error    { return nil }
+func (c *afterErrorCmd) After() error  { return errAfterFailed }
+
+func TestRun_AfterError(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{"app"}
+	if err := Run(&afterErrorCmd{}); err == nil {
+		t.Error("expected error from After")
 	}
 }
