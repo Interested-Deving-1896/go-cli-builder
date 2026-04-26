@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/signal"
 	"reflect"
 	"strings"
 	"sync"
@@ -100,6 +101,7 @@ func applyBindings(node *parser.CommandNode, flags map[string]string, args []str
 type App struct {
 	RootNode     *parser.CommandNode
 	Translator   help.Translator
+	ctx          context.Context
 	version      string
 	mu           sync.Mutex
 }
@@ -110,7 +112,8 @@ func New(root any) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
-	return &App{RootNode: rootNode}, nil
+	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt)
+	return &App{RootNode: rootNode, ctx: ctx}, nil
 }
 
 // SetName sets the name of the root command.
@@ -126,6 +129,8 @@ func (a *App) SetName(name string) {
 //
 //	err := app.Reload()
 func (a *App) Reload() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.RootNode == nil {
 		return nil
 	}
@@ -138,6 +143,8 @@ func (a *App) Reload() error {
 
 // AddCommand adds a dynamic command to the application.
 func (a *App) AddCommand(name string, cmd *parser.CommandNode) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.RootNode.Children == nil {
 		a.RootNode.Children = make(map[string]*parser.CommandNode)
 	}
@@ -152,6 +159,11 @@ func (a *App) SetTranslator(tr help.Translator) {
 // SetVersion sets the version string for the application.
 func (a *App) SetVersion(v string) {
 	a.version = v
+}
+
+// SetContext sets the context for the application.
+func (a *App) SetContext(ctx context.Context) {
+	a.ctx = ctx
 }
 
 // Run executes the application based on the provided root struct.
@@ -231,7 +243,7 @@ func (a *App) Run() error {
 	}
 
 	for _, node := range path {
-		injectDependencies(node)
+		injectDependencies(node, a.ctx)
 	}
 
 	for _, node := range path {
@@ -460,7 +472,7 @@ func bindArgs(node *parser.CommandNode, args []string) error {
 }
 
 // injectDependencies injects the logger and context into the command struct if it embeds the Base struct.
-func injectDependencies(node *parser.CommandNode) {
+func injectDependencies(node *parser.CommandNode, ctx context.Context) {
 	logger := log.New()
 
 	val := node.Value
@@ -476,7 +488,7 @@ func injectDependencies(node *parser.CommandNode) {
 			if field.CanSet() {
 				base := Base{
 					Logger: logger,
-					Ctx:    context.Background(),
+					Ctx:    ctx,
 				}
 				field.Set(reflect.ValueOf(base))
 			}

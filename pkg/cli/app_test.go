@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"reflect"
@@ -390,8 +391,9 @@ func TestInjectDependencies(t *testing.T) {
 		Base
 	}
 	v := &cmdWithBase{}
+	ctx := context.Background()
 	node := parser.NewCommandNode("test", "", reflect.ValueOf(v))
-	injectDependencies(node)
+	injectDependencies(node, ctx)
 	if v.Ctx == nil {
 		t.Error("expected non-nil Ctx after injectDependencies")
 	}
@@ -402,9 +404,10 @@ func TestInjectDependencies_NoBase(t *testing.T) {
 		Name string
 	}
 	v := &cmdWithoutBase{Name: "test"}
+	ctx := context.Background()
 	node := parser.NewCommandNode("test", "", reflect.ValueOf(v))
 	originalName := v.Name
-	injectDependencies(node)
+	injectDependencies(node, ctx)
 	if v.Name != originalName {
 		t.Errorf("Name should not change: got %q, want %q", v.Name, originalName)
 	}
