@@ -18,7 +18,13 @@ var flagTagParser = tags.NewParser("flag", tags.WithPairDelimiter(","), tags.Wit
 //	node, err := parser.Parse("apx", root)
 func Parse(name string, root any) (*CommandNode, error) {
 	val := reflect.ValueOf(root)
+	if !val.IsValid() {
+		return nil, fmt.Errorf("invalid root value (nil)")
+	}
 	if val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			return nil, fmt.Errorf("root value is a nil pointer")
+		}
 		val = val.Elem()
 	}
 
