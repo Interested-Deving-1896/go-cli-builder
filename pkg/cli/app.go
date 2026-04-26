@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mirkobrombin/go-cli-builder/v2/internal/binder"
@@ -97,8 +98,10 @@ func applyBindings(node *parser.CommandNode, flags map[string]string, args []str
 
 // App represents a CLI application.
 type App struct {
-	RootNode   *parser.CommandNode
-	Translator help.Translator
+	RootNode     *parser.CommandNode
+	Translator   help.Translator
+	version      string
+	mu           sync.Mutex
 }
 
 // New creates a new App from a root struct.
@@ -146,6 +149,11 @@ func (a *App) SetTranslator(tr help.Translator) {
 	a.Translator = tr
 }
 
+// SetVersion sets the version string for the application.
+func (a *App) SetVersion(v string) {
+	a.version = v
+}
+
 // Run executes the application based on the provided root struct.
 // It parses the CLI arguments, resolves commands, binds flags, infuses dependencies, and runs lifecycle hooks.
 //
@@ -186,6 +194,26 @@ func (a *App) Run() error {
 		if arg == "-h" || arg == "--help" {
 			fmt.Print(help.GenerateHelp(targetNode, a.Translator))
 			return nil
+		}
+	}
+
+	for i, arg := range allFlags {
+		if arg == "--version" && a.version != "" {
+			fmt.Println(a.version)
+			return nil
+		}
+		if arg == "--completion" && i+1 < len(allFlags) {
+			shell := allFlags[i+1]
+			switch shell {
+			case "bash":
+				return a.GenBashCompletion(os.Stdout)
+			case "zsh":
+				return a.GenZshCompletion(os.Stdout)
+			case "fish":
+				return a.GenFishCompletion(os.Stdout)
+			default:
+				return fmt.Errorf("unknown shell for completion: %s (supported: bash, zsh, fish)", shell)
+			}
 		}
 	}
 
