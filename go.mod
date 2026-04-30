@@ -4,4 +4,4 @@ go 1.24.0
 
 toolchain go1.24.4
 
-require github.com/mirkobrombin/go-foundation v0.3.0
+require github.com/mirkobrombin/go-foundation v1.0.0

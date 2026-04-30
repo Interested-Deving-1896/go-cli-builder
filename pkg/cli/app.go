@@ -16,6 +16,11 @@ import (
 	"github.com/mirkobrombin/go-cli-builder/v2/pkg/log"
 	"github.com/mirkobrombin/go-cli-builder/v2/pkg/parser"
 	"github.com/mirkobrombin/go-cli-builder/v2/pkg/resolver"
+	"github.com/mirkobrombin/go-foundation/pkg/di"
+	"github.com/mirkobrombin/go-foundation/pkg/errutil"
+	"github.com/mirkobrombin/go-foundation/pkg/options"
+	"github.com/mirkobrombin/go-foundation/pkg/reflectutil"
+	"github.com/mirkobrombin/go-foundation/pkg/validation"
 )
 
 // applyBindings binds flags and args to the struct fields using the external binder library.
@@ -99,21 +104,63 @@ func applyBindings(node *parser.CommandNode, flags map[string]string, args []str
 
 // App represents a CLI application.
 type App struct {
-	RootNode     *parser.CommandNode
-	Translator   help.Translator
-	ctx          context.Context
-	version      string
-	mu           sync.Mutex
+	RootNode       *parser.CommandNode
+	Translator     help.Translator
+	Container      *di.Container
+	Validator      *validation.Validator
+	ctx            context.Context
+	version        string
+	mu             sync.Mutex
+	panicRecovery  bool
+}
+
+// AppOption is a functional option for App configuration.
+type AppOption = options.Option[App]
+
+// WithVersion sets the application version.
+func WithVersion(v string) AppOption {
+	return func(a *App) { a.version = v }
+}
+
+// WithContext sets the application context.
+func WithContext(ctx context.Context) AppOption {
+	return func(a *App) { a.ctx = ctx }
+}
+
+// WithTranslator sets the help translator.
+func WithTranslator(tr help.Translator) AppOption {
+	return func(a *App) { a.Translator = tr }
+}
+
+// WithContainer sets the DI container for dependency injection in commands.
+func WithContainer(container *di.Container) AppOption {
+	return func(a *App) { a.Container = container }
+}
+
+// WithValidator sets the struct validator for command validation.
+func WithValidator(validator *validation.Validator) AppOption {
+	return func(a *App) { a.Validator = validator }
+}
+
+// WithPanicRecovery enables panic recovery in Run.
+func WithPanicRecovery() AppOption {
+	return func(a *App) { a.panicRecovery = true }
 }
 
 // New creates a new App from a root struct.
-func New(root any) (*App, error) {
+//
+// Example:
+//
+//	app, err := cli.New(&CLI{}, cli.WithVersion("1.0.0"))
+func New(root any, opts ...AppOption) (*App, error) {
 	rootNode, err := parser.Parse("root", root)
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
 	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt)
-	return &App{RootNode: rootNode, ctx: ctx}, nil
+	app := &App{RootNode: rootNode, ctx: ctx}
+	options.Apply(app, opts...)
+	return app, nil
 }
 
 // SetName sets the name of the root command.
@@ -177,8 +224,8 @@ func (a *App) SetContext(ctx context.Context) {
 //			log.Fatal(err)
 //		}
 //	}
-func Run(root any) error {
-	app, err := New(root)
+func Run(root any, opts ...AppOption) error {
+	app, err := New(root, opts...)
 	if err != nil {
 		return err
 	}
@@ -186,13 +233,21 @@ func Run(root any) error {
 }
 
 // Run executes the application.
-func (a *App) Run() error {
+func (a *App) Run() (runErr error) {
+	if a.panicRecovery {
+		defer func() {
+			if r := recover(); r != nil {
+				runErr = errutil.Wrap(fmt.Errorf("panic: %v", r))
+			}
+		}()
+	}
+
 	args := os.Args[1:]
 
 	targetNode, allFlags, err := resolveCommand(a.RootNode, args)
 	if err != nil {
 		fmt.Println(help.GenerateHelp(a.RootNode, a.Translator))
-		return err
+		return errutil.Wrap(err)
 	}
 
 	path := getPathToNode(a.RootNode, targetNode)
@@ -224,7 +279,7 @@ func (a *App) Run() error {
 			case "fish":
 				return a.GenFishCompletion(os.Stdout)
 			default:
-				return fmt.Errorf("unknown shell for completion: %s (supported: bash, zsh, fish)", shell)
+				return errutil.Wrap(fmt.Errorf("unknown shell for completion: %s (supported: bash, zsh, fish)", shell))
 			}
 		}
 	}
@@ -233,28 +288,42 @@ func (a *App) Run() error {
 	if err != nil {
 		fmt.Printf("Error: %v\n\n", err)
 		fmt.Print(help.GenerateHelp(targetNode, a.Translator))
-		return err
+		return errutil.Wrap(err)
 	}
 
 	if err := applyBindings(targetNode, parsedFlags, positionalArgs, effectiveFlags); err != nil {
 		fmt.Printf("Error: %v\n\n", err)
 		fmt.Print(help.GenerateHelp(targetNode, a.Translator))
-		return err
+		return errutil.Wrap(err)
+	}
+
+	if a.Validator != nil {
+		val := targetNode.Value
+		if val.Kind() != reflect.Ptr && val.CanAddr() {
+			val = val.Addr()
+		}
+		if errs := a.Validator.Validate(val.Interface()); len(errs) > 0 {
+			for _, e := range errs {
+				fmt.Fprintf(os.Stderr, "validation error: %s\n", e.Error())
+			}
+			fmt.Print(help.GenerateHelp(targetNode, a.Translator))
+			return errutil.Wrap(errs)
+		}
 	}
 
 	for _, node := range path {
-		injectDependencies(node, a.ctx)
+		injectDependencies(node, a.ctx, a.Container)
 	}
 
 	for _, node := range path {
 		if beforeRunner, ok := node.Value.Interface().(BeforeRunner); ok {
 			if err := beforeRunner.Before(); err != nil {
-				return err
+				return errutil.Wrap(err)
 			}
 		} else if node.Value.CanAddr() {
 			if beforeRunner, ok := node.Value.Addr().Interface().(BeforeRunner); ok {
 				if err := beforeRunner.Before(); err != nil {
-					return err
+					return errutil.Wrap(err)
 				}
 			}
 		}
@@ -263,13 +332,13 @@ func (a *App) Run() error {
 	executed := false
 	if runner, ok := targetNode.Value.Interface().(Runner); ok {
 		if err := runner.Run(); err != nil {
-			return err
+			return errutil.Wrap(err)
 		}
 		executed = true
 	} else if targetNode.Value.CanAddr() {
 		if runner, ok := targetNode.Value.Addr().Interface().(Runner); ok {
 			if err := runner.Run(); err != nil {
-				return err
+				return errutil.Wrap(err)
 			}
 			executed = true
 		}
@@ -283,12 +352,12 @@ func (a *App) Run() error {
 		node := path[i]
 		if afterRunner, ok := node.Value.Interface().(AfterRunner); ok {
 			if err := afterRunner.After(); err != nil {
-				return err
+				return errutil.Wrap(err)
 			}
 		} else if node.Value.CanAddr() {
 			if afterRunner, ok := node.Value.Addr().Interface().(AfterRunner); ok {
 				if err := afterRunner.After(); err != nil {
-					return err
+					return errutil.Wrap(err)
 				}
 			}
 		}
@@ -313,7 +382,6 @@ func resolveCommand(root *parser.CommandNode, args []string) (*parser.CommandNod
 				if child, ok := current.Children[arg]; ok {
 					current = child
 				} else {
-					// Not a subcommand, must be positional arg.
 					parsingCmds = false
 					remaining = append(remaining, arg)
 				}
@@ -326,7 +394,7 @@ func resolveCommand(root *parser.CommandNode, args []string) (*parser.CommandNod
 	return current, remaining, nil
 }
 
-// getPathToNode reconstructs path from root to target (inefficient but safe).
+// getPathToNode reconstructs path from root to target.
 func getPathToNode(root, target *parser.CommandNode) []*parser.CommandNode {
 	if root == target {
 		return []*parser.CommandNode{root}
@@ -345,7 +413,6 @@ func parseArgs(args []string, effectiveFlags map[string]*parser.FlagMetadata) (m
 	flags := make(map[string]string)
 	positionals := []string{}
 
-	// Reverse Lookup for short flags
 	shortMap := make(map[string]string)
 	for name, meta := range effectiveFlags {
 		if meta.Short != "" {
@@ -442,14 +509,14 @@ func parseArgs(args []string, effectiveFlags map[string]*parser.FlagMetadata) (m
 	return flags, positionals, nil
 }
 
-// bindArgs binds positional arguments to the struct fields using the internal resolver.
+// bindArgs binds positional arguments to the struct fields using reflectutil.
 func bindArgs(node *parser.CommandNode, args []string) error {
 	argIdx := 0
 	for _, meta := range node.Args {
 		if meta.IsGreedy {
 			if len(args) > argIdx {
 				for _, v := range args[argIdx:] {
-					if err := resolver.BindValue(meta.Field, v); err != nil {
+					if err := reflectutil.Bind(meta.Field, v); err != nil {
 						return err
 					}
 				}
@@ -459,7 +526,7 @@ func bindArgs(node *parser.CommandNode, args []string) error {
 			break
 		} else {
 			if argIdx < len(args) {
-				if err := resolver.BindValue(meta.Field, args[argIdx]); err != nil {
+				if err := reflectutil.Bind(meta.Field, args[argIdx]); err != nil {
 					return err
 				}
 				argIdx++
@@ -471,8 +538,8 @@ func bindArgs(node *parser.CommandNode, args []string) error {
 	return nil
 }
 
-// injectDependencies injects the logger and context into the command struct if it embeds the Base struct.
-func injectDependencies(node *parser.CommandNode, ctx context.Context) {
+// injectDependencies injects the logger, context and DI container into the command struct if it embeds the Base struct.
+func injectDependencies(node *parser.CommandNode, ctx context.Context, container *di.Container) {
 	logger := log.New()
 
 	val := node.Value
@@ -487,11 +554,23 @@ func injectDependencies(node *parser.CommandNode, ctx context.Context) {
 		if fieldType.Type == reflect.TypeFor[Base]() {
 			if field.CanSet() {
 				base := Base{
-					Logger: logger,
-					Ctx:    ctx,
+					Logger:    logger,
+					Ctx:       ctx,
+					Container: container,
 				}
 				field.Set(reflect.ValueOf(base))
 			}
 		}
+	}
+
+	if container != nil {
+		injectDIFields(val, container)
+	}
+}
+
+// injectDIFields uses the DI container to inject dependencies tagged with `inject`.
+func injectDIFields(val reflect.Value, container *di.Container) {
+	if val.Kind() == reflect.Struct && val.CanAddr() {
+		container.Inject(val.Addr().Interface())
 	}
 }

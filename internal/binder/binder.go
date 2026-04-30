@@ -6,8 +6,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/mirkobrombin/go-foundation/pkg/hooks"
-	freflect "github.com/mirkobrombin/go-foundation/pkg/reflect"
+	"github.com/mirkobrombin/go-foundation/pkg/reflectutil"
 )
 
 // HandlerFunc handles binding a set of string arguments to a field.
@@ -17,7 +16,6 @@ type HandlerFunc func(args []string) error
 type Binder struct {
 	dst      any
 	handlers map[string]HandlerFunc
-	runner   *hooks.Runner
 }
 
 // NewBinder creates a new binder for the destination object.
@@ -25,7 +23,6 @@ func NewBinder(dst any) (*Binder, error) {
 	b := &Binder{
 		dst:      dst,
 		handlers: make(map[string]HandlerFunc),
-		runner:   hooks.NewRunner(),
 	}
 
 	if err := b.autoDiscover(); err != nil {
@@ -82,7 +79,7 @@ func (b *Binder) registerDefaultHandler(field reflect.Value, name string) {
 			return nil
 		}
 
-		return freflect.Bind(field, val)
+		return reflectutil.Bind(field, val)
 	}
 }
 

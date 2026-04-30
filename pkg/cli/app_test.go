@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/mirkobrombin/go-cli-builder/v2/pkg/parser"
+	"github.com/mirkobrombin/go-foundation/pkg/di"
+	"github.com/mirkobrombin/go-foundation/pkg/validation"
 )
 
 var (
@@ -393,7 +395,7 @@ func TestInjectDependencies(t *testing.T) {
 	v := &cmdWithBase{}
 	ctx := context.Background()
 	node := parser.NewCommandNode("test", "", reflect.ValueOf(v))
-	injectDependencies(node, ctx)
+	injectDependencies(node, ctx, nil)
 	if v.Ctx == nil {
 		t.Error("expected non-nil Ctx after injectDependencies")
 	}
@@ -407,7 +409,7 @@ func TestInjectDependencies_NoBase(t *testing.T) {
 	ctx := context.Background()
 	node := parser.NewCommandNode("test", "", reflect.ValueOf(v))
 	originalName := v.Name
-	injectDependencies(node, ctx)
+	injectDependencies(node, ctx, nil)
 	if v.Name != originalName {
 		t.Errorf("Name should not change: got %q, want %q", v.Name, originalName)
 	}
@@ -608,4 +610,106 @@ func TestRun_AfterError(t *testing.T) {
 	if err := Run(&afterErrorCmd{}); err == nil {
 		t.Error("expected error from After")
 	}
+}
+
+func TestNew_WithOptions(t *testing.T) {
+	app, err := New(&testRootCmd{},
+		WithVersion("1.0.0"),
+		WithPanicRecovery(),
+	)
+	if err != nil {
+		t.Fatalf("New with options failed: %v", err)
+	}
+	if app.version != "1.0.0" {
+		t.Errorf("got version %q, want %q", app.version, "1.0.0")
+	}
+	if !app.panicRecovery {
+		t.Error("expected panicRecovery to be true")
+	}
+}
+
+func TestNew_WithContainer(t *testing.T) {
+	builder := di.NewBuilder()
+	container, err := builder.Build()
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	app, err := New(&testRootCmd{}, WithContainer(container))
+	if err != nil {
+		t.Fatalf("New with container failed: %v", err)
+	}
+	if app.Container == nil {
+		t.Error("expected non-nil Container")
+	}
+}
+
+func TestNew_WithValidator(t *testing.T) {
+	v := validation.New()
+	app, err := New(&testRootCmd{}, WithValidator(v))
+	if err != nil {
+		t.Fatalf("New with validator failed: %v", err)
+	}
+	if app.Validator == nil {
+		t.Error("expected non-nil Validator")
+	}
+}
+
+type validationCmd struct {
+	Email string `cli:"email" help:"Email address" validate:"email"`
+}
+
+func (c *validationCmd) Run() error { return nil }
+
+func TestRun_WithValidation(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	v := validation.New()
+	os.Args = []string{"app", "--email", "not-an-email"}
+	err := Run(&validationCmd{}, WithValidator(v))
+	if err == nil {
+		t.Error("expected validation error")
+	}
+}
+
+func TestRun_WithValidationPass(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	v := validation.New()
+	os.Args = []string{"app", "--email", "user@example.com"}
+	err := Run(&validationCmd{}, WithValidator(v))
+	if err != nil {
+		t.Errorf("expected no validation error, got: %v", err)
+	}
+}
+
+type panicCmd struct{}
+
+func (c *panicCmd) Run() error {
+	panic("something went wrong")
+}
+
+func TestRun_WithPanicRecovery(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{"app"}
+	err := Run(&panicCmd{}, WithPanicRecovery())
+	if err == nil {
+		t.Error("expected error from panic recovery")
+	}
+}
+
+func TestRun_WithoutPanicRecovery(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic to propagate without recovery")
+		}
+	}()
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{"app"}
+	Run(&panicCmd{})
 }
